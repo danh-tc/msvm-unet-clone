@@ -10,6 +10,7 @@ from scipy.ndimage import zoom
 from medpy import metric
 from loguru import logger
 from utils import CLASS_COLOR_MAPS
+from plot import save_x_y, save_x_y_hat, class2colormap
 from typing import Any
 
 def calc_metric_per_case(pred: np.ndarray, gt: np.ndarray) -> tuple[float, float, float, float]:
@@ -80,6 +81,21 @@ def test_single_volume(
                 pred = out
 
             prediction[depth] = pred
+
+            save_x_y(
+                x=(volume[depth, :, :] * 255).astype(np.uint8),
+                y=label[depth, :, :].astype(np.uint8),
+                colormap=class2colormap[num_classes],
+                out=os.path.join(output_folder, f"{case_name}_{depth}_gt.png")
+            )
+
+            save_x_y_hat(
+                x=(volume[depth, :, :] * 255).astype(np.uint8),
+                y=label[depth, :, :].astype(np.uint8),
+                y_hat=pred.astype(np.uint8),
+                colormap=class2colormap[num_classes],
+                out=os.path.join(output_folder, f"{case_name}_{depth}_pd.png")
+            )
 
     logger.info("Evaluating...")
     metrics = []
