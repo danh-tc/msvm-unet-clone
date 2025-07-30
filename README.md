@@ -10,6 +10,11 @@ Paper: ([arXiv 2408.13735](https://arxiv.org/abs/2408.13735))
 
 </div>
 
+<video controls  style="max-width: 100%; height: auto;">
+  <source src="assets/intro.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
 ## Abstract
 
 State Space Models (SSMs), especially Mamba, have shown great promise in medical image segmentation due to their ability to model long-range dependencies with linear computational complexity. However, accurate medical image segmentation requires the effective learning of both multi-scale detailed feature representations and global contextual dependencies. Although existing works have attempted to address this issue by integrating CNNs and SSMs to leverage their respective strengths, they have not designed specialized modules to effectively capture multi-scale feature representations, nor have they adequately addressed the directional sensitivity problem when applying Mamba to 2D image data. To overcome these limitations, we propose a Multi-Scale Vision Mamba UNet model for medical image segmentation, termed MSVM-UNet. Specifically, by introducing multi-scale convolutions in the VSS blocks, we can more effectively capture and aggregate multi-scale feature representations from the hierarchical features of the VMamba encoder and better handle 2D visual data. Additionally, the large kernel patch expanding (LKPE) layers achieve more efficient upsampling of feature maps by simultaneously integrating spatial and channel information. Extensive experiments on the Synapse and ACDC datasets demonstrate that our approach is more effective than some state-of-the-art methods in capturing and aggregating multi-scale feature representations and modeling long-range dependencies between pixels.
@@ -58,7 +63,7 @@ pip install -e .
 
 #### ImageNet pretrained model:
 
-You should download the pretrained VMamba-Tiny V2 model (vssm_tiny_0230_ckpt_epoch_262) from [VMamba](https://github.com/MzeroMiko/VMamba/releases/download/%23v2cls/vssm_tiny_0230_ckpt_epoch_262.pth), and then put it in the `model/pretrain/` folder for initialization.
+You should download the pretrained VMamba-Tiny V2 model (vssm1_tiny_0230s_ckpt_epoch_264.pth) from [VMamba](https://github.com/MzeroMiko/VMamba/releases/download/%23v2cls/vssm1_tiny_0230s_ckpt_epoch_264.pth), and then put it in the `model/pretrain/` folder for initialization.
 
 ## Training
 
