@@ -10,10 +10,7 @@ Paper: ([arXiv 2408.13735](https://arxiv.org/abs/2408.13735))
 
 </div>
 
-<video controls  style="max-width: 100%; height: auto;">
-  <source src="assets/intro.mp4" type="video/mp4">
-  Your browser does not support the video tag.
-</video>
+[![Introduction](assets/preview.png)](https://www.bilibili.com/video/BV1MrKozVEob/?share_source=copy_web&vd_source=2fad22c64693cc4a815cd4e2d25a4f19)
 
 ## Abstract
 
