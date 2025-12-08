@@ -229,7 +229,7 @@ $DATASET_HOME/
     ├── synapse/
     │   ├── train/
     │   └── test/
-    └── acdc_01/
+    └── acdc/
         ├── train/
         ├── valid/
         └── test/
