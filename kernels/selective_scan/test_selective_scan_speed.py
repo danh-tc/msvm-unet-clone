@@ -1,16 +1,12 @@
 # Modified by Mzero #20240123
 # Copyright (C) 2023, Tri Dao, Albert Gu.
 
-import math
-import torch
-import torch.nn.functional as F
-import pytest
-import torch
-import torch.nn.functional as F
-from torch.cuda.amp import custom_bwd, custom_fwd
-from einops import rearrange, repeat
-import time
 from functools import partial
+import time
+
+from einops import rearrange, repeat
+import torch
+import torch.nn.functional as F
 
 
 def build_selective_scan_fn(selective_scan_cuda: object = None, mode="mamba_ssm", tag=None):
@@ -18,7 +14,21 @@ def build_selective_scan_fn(selective_scan_cuda: object = None, mode="mamba_ssm"
 
     class SelectiveScanFn(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False, return_last_state=False, nrows=1, backnrows=-1):
+        def forward(
+            ctx,
+            u,
+            delta,
+            A,
+            B,
+            C,
+            D=None,
+            z=None,
+            delta_bias=None,
+            delta_softplus=False,
+            return_last_state=False,
+            nrows=1,
+            backnrows=-1,
+        ):
             if u.stride(-1) != 1:
                 u = u.contiguous()
             if delta.stride(-1) != 1:
@@ -44,16 +54,16 @@ def build_selective_scan_fn(selective_scan_cuda: object = None, mode="mamba_ssm"
                 ctx._delta_bias_dtype = delta_bias.dtype
                 delta_bias = delta_bias.float()
 
-            assert u.shape[1] % (B.shape[1] * nrows) == 0 
-            assert nrows in [1, 2, 3, 4] # 8+ is too slow to compile
+            assert u.shape[1] % (B.shape[1] * nrows) == 0
+            assert nrows in [1, 2, 3, 4]  # 8+ is too slow to compile
 
             if backnrows > 0:
-                assert u.shape[1] % (B.shape[1] * backnrows) == 0 
-                assert backnrows in [1, 2, 3, 4] # 8+ is too slow to compile
+                assert u.shape[1] % (B.shape[1] * backnrows) == 0
+                assert backnrows in [1, 2, 3, 4]  # 8+ is too slow to compile
             else:
                 backnrows = nrows
             ctx.backnrows = backnrows
-            
+
             if MODE in ["mamba_ssm"]:
                 out, x, *rest = selective_scan_cuda.fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus)
 
@@ -100,17 +110,52 @@ def build_selective_scan_fn(selective_scan_cuda: object = None, mode="mamba_ssm"
             # Here we just pass in None and dz will be allocated in the C++ code.
             if MODE in ["mamba_ssm"]:
                 du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda.bwd(
-                    u, delta, A, B, C, D, z, delta_bias, dout, x, out, None, ctx.delta_softplus,
-                    False # option to recompute out_z, not used here
+                    u,
+                    delta,
+                    A,
+                    B,
+                    C,
+                    D,
+                    z,
+                    delta_bias,
+                    dout,
+                    x,
+                    out,
+                    None,
+                    ctx.delta_softplus,
+                    False,  # option to recompute out_z, not used here
                 )
             elif MODE in ["sstest"]:
                 du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda.bwd(
-                    u, delta, A, B, C, D, z, delta_bias, dout, x, out, None, ctx.delta_softplus,
-                    False, ctx.backnrows  # option to recompute out_z, not used here
+                    u,
+                    delta,
+                    A,
+                    B,
+                    C,
+                    D,
+                    z,
+                    delta_bias,
+                    dout,
+                    x,
+                    out,
+                    None,
+                    ctx.delta_softplus,
+                    False,
+                    ctx.backnrows,  # option to recompute out_z, not used here
                 )
             elif MODE in ["sscore"]:
                 du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda.bwd(
-                    u, delta, A, B, C, D, delta_bias, dout, x, ctx.delta_softplus, ctx.backnrows
+                    u,
+                    delta,
+                    A,
+                    B,
+                    C,
+                    D,
+                    delta_bias,
+                    dout,
+                    x,
+                    ctx.delta_softplus,
+                    ctx.backnrows,
                 )
             elif MODE in ["sscorendstate"]:
                 du, ddelta, dA, dB, dC, dD, ddelta_bias, *rest = selective_scan_cuda.bwd(
@@ -121,11 +166,11 @@ def build_selective_scan_fn(selective_scan_cuda: object = None, mode="mamba_ssm"
                 dC = dC.unsqueeze(2)
             else:
                 raise NotImplementedError
-            
+
             dz = rest[0] if ctx.has_z else None
             dB = dB.squeeze(1) if getattr(ctx, "squeeze_B", False) else dB
             dC = dC.squeeze(1) if getattr(ctx, "squeeze_C", False) else dC
-            
+
             _dD = None
             if D is not None:
                 if dD.dtype != getattr(ctx, "_d_dtype", dD.dtype):
@@ -140,26 +185,71 @@ def build_selective_scan_fn(selective_scan_cuda: object = None, mode="mamba_ssm"
                 else:
                     _ddelta_bias = ddelta_bias
 
-            return (du, ddelta, dA, dB, dC,
-                        dD if D is not None else None,
-                        dz,
-                        ddelta_bias if delta_bias is not None else None,
-                        None, None, None, None)
+            return (
+                du,
+                ddelta,
+                dA,
+                dB,
+                dC,
+                dD if D is not None else None,
+                dz,
+                ddelta_bias if delta_bias is not None else None,
+                None,
+                None,
+                None,
+                None,
+            )
 
-    def selective_scan_fn(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False, return_last_state=False, nrows=1, backnrows=-1):
+    def selective_scan_fn(
+        u,
+        delta,
+        A,
+        B,
+        C,
+        D=None,
+        z=None,
+        delta_bias=None,
+        delta_softplus=False,
+        return_last_state=False,
+        nrows=1,
+        backnrows=-1,
+    ):
         """if return_last_state is True, returns (out, last_state)
         last_state has shape (batch, dim, dstate). Note that the gradient of the last state is
         not considered in the backward pass.
         """
-        return SelectiveScanFn.apply(u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state, nrows, backnrows)
+        return SelectiveScanFn.apply(
+            u,
+            delta,
+            A,
+            B,
+            C,
+            D,
+            z,
+            delta_bias,
+            delta_softplus,
+            return_last_state,
+            nrows,
+            backnrows,
+        )
 
-    selective_scan_fn.__repr__ = lambda *_ :f"selective_scan_fn | {mode} | {tag}"
+    selective_scan_fn.__repr__ = lambda *_: f"selective_scan_fn | {mode} | {tag}"
 
     return selective_scan_fn
 
 
-def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta_softplus=False,
-                      return_last_state=False):
+def selective_scan_ref(
+    u,
+    delta,
+    A,
+    B,
+    C,
+    D=None,
+    z=None,
+    delta_bias=None,
+    delta_softplus=False,
+    return_last_state=False,
+):
     """
     u: r(B D L)
     delta: r(B D L)
@@ -193,33 +283,33 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
         C = C.float()
     x = A.new_zeros((batch, dim, dstate))
     ys = []
-    deltaA = torch.exp(torch.einsum('bdl,dn->bdln', delta, A))
+    deltaA = torch.exp(torch.einsum("bdl,dn->bdln", delta, A))
     if not is_variable_B:
-        deltaB_u = torch.einsum('bdl,dn,bdl->bdln', delta, B, u)
+        deltaB_u = torch.einsum("bdl,dn,bdl->bdln", delta, B, u)
     else:
         if B.dim() == 3:
-            deltaB_u = torch.einsum('bdl,bnl,bdl->bdln', delta, B, u)
+            deltaB_u = torch.einsum("bdl,bnl,bdl->bdln", delta, B, u)
         else:
             B = repeat(B, "B G N L -> B (G H) N L", H=dim // B.shape[1])
-            deltaB_u = torch.einsum('bdl,bdnl,bdl->bdln', delta, B, u)
+            deltaB_u = torch.einsum("bdl,bdnl,bdl->bdln", delta, B, u)
     if is_variable_C and C.dim() == 4:
         C = repeat(C, "B G N L -> B (G H) N L", H=dim // C.shape[1])
     last_state = None
     for i in range(u.shape[2]):
         x = deltaA[:, :, i] * x + deltaB_u[:, :, i]
         if not is_variable_C:
-            y = torch.einsum('bdn,dn->bd', x, C)
+            y = torch.einsum("bdn,dn->bd", x, C)
         else:
             if C.dim() == 3:
-                y = torch.einsum('bdn,bn->bd', x, C[:, :, i])
+                y = torch.einsum("bdn,bn->bd", x, C[:, :, i])
             else:
-                y = torch.einsum('bdn,bdn->bd', x, C[:, :, :, i])
+                y = torch.einsum("bdn,bdn->bd", x, C[:, :, :, i])
         if i == u.shape[2] - 1:
             last_state = x
         if y.is_complex():
             y = y.real * 2
         ys.append(y)
-    y = torch.stack(ys, dim=2) # (batch dim L)
+    y = torch.stack(ys, dim=2)  # (batch dim L)
     out = y if D is None else y + u * rearrange(D, "d -> d 1")
     if z is not None:
         out = out * F.silu(z)
@@ -227,10 +317,21 @@ def selective_scan_ref(u, delta, A, B, C, D=None, z=None, delta_bias=None, delta
     return out if not return_last_state else (out, last_state)
 
 
-def selective_scan_easy_v2(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softplus=False, return_last_state=False, chunksize=3):
+def selective_scan_easy_v2(
+    us,
+    dts,
+    As,
+    Bs,
+    Cs,
+    Ds,
+    delta_bias=None,
+    delta_softplus=False,
+    return_last_state=False,
+    chunksize=3,
+):
     """
     # B: batch_size, G: groups, D: dim, N: state dim, L: seqlen
-    us: B, G * D, L 
+    us: B, G * D, L
     dts: B, G * D, L
     As: G * D, N
     Bs: B, G, N, L
@@ -239,6 +340,7 @@ def selective_scan_easy_v2(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softp
     delta_bias: G * D
     # chunksize can be any as you like. But as the chunksize raises, hs may get None, as exp(sum(delta) A) is really small
     """
+
     def selective_scan_chunk(us, dts, As, Bs, Cs, hprefix, Mask):
         """
         partial(h) / partial(t) = Ah + Bu; y = Ch + Du;
@@ -261,7 +363,9 @@ def selective_scan_easy_v2(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softp
         Ats = (-K_chunk_tmp).exp()
         Q_chunk = torch.einsum("lbgd,lbgn->lbgdn", dts * us, Bs)
         if LChunk < chunksize:
-            Qm_chunk = Mask[:LChunk, :LChunk, None, None, None, None] * Q_chunk.unsqueeze(0).repeat(LChunk, 1, 1, 1, 1, 1)
+            Qm_chunk = Mask[:LChunk, :LChunk, None, None, None, None] * Q_chunk.unsqueeze(0).repeat(
+                LChunk, 1, 1, 1, 1, 1
+            )
         else:
             Qm_chunk = Mask[:, :, None, None, None, None] * Q_chunk.unsqueeze(0).repeat(LChunk, 1, 1, 1, 1, 1)
         H_tmp = Ats * torch.einsum("rlbgdn,lbgdn->rbgdn", Qm_chunk, K_chunk)
@@ -282,7 +386,7 @@ def selective_scan_easy_v2(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softp
         dts = dts + delta_bias.view(1, -1, 1).to(dtype)
     if delta_softplus:
         dts = torch.nn.functional.softplus(dts)
-    
+
     if len(Bs.shape) == 3:
         Bs = Bs.unsqueeze(1)
     if len(Cs.shape) == 3:
@@ -295,13 +399,18 @@ def selective_scan_easy_v2(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softp
     Cs = Cs.permute(3, 0, 1, 2).to(dtype)
     Ds = Ds.view(G, -1).to(dtype) if has_D else None
     D = As.shape[1]
-    
+
     oys = []
     hprefix = us.new_zeros((B, G, D, N), dtype=dtype)
     for i in range(0, L, chunksize):
         ys, hs = selective_scan_chunk(
-            us[i:i + chunksize], dts[i:i + chunksize], 
-            As, Bs[i:i + chunksize], Cs[i:i + chunksize], hprefix, Mask
+            us[i : i + chunksize],
+            dts[i : i + chunksize],
+            As,
+            Bs[i : i + chunksize],
+            Cs[i : i + chunksize],
+            hprefix,
+            Mask,
         )
         oys.append(ys)
         hprefix = hs[-1]
@@ -315,10 +424,21 @@ def selective_scan_easy_v2(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softp
     return oys.to(inp_dtype) if not return_last_state else (oys.to(inp_dtype), hprefix.view(B, G * D, N).float())
 
 
-def selective_scan_easy(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softplus=False, return_last_state=False, chunksize=64):
+def selective_scan_easy(
+    us,
+    dts,
+    As,
+    Bs,
+    Cs,
+    Ds,
+    delta_bias=None,
+    delta_softplus=False,
+    return_last_state=False,
+    chunksize=64,
+):
     """
     # B: batch_size, G: groups, D: dim, N: state dim, L: seqlen
-    us: B, G * D, L 
+    us: B, G * D, L
     dts: B, G * D, L
     As: G * D, N
     Bs: B, G, N, L
@@ -327,6 +447,7 @@ def selective_scan_easy(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softplus
     delta_bias: G * D
     # chunksize can be any as you like. But as the chunksize raises, hs may get None, as exp(sum(delta) A) is really small
     """
+
     def selective_scan_chunk(us, dts, As, Bs, Cs, hprefix):
         """
         partial(h) / partial(t) = Ah + Bu; y = Ch + Du;
@@ -349,11 +470,10 @@ def selective_scan_easy(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softplus
         rAts = Ats / scale
         duts = dts * us
         dtBus = torch.einsum("lbgd,lbgn->lbgdn", duts, Bs)
-        hs_tmp = rAts * (dtBus / rAts).cumsum(dim=0) 
+        hs_tmp = rAts * (dtBus / rAts).cumsum(dim=0)
         hs = hs_tmp + Ats * hprefix.unsqueeze(0)
-        ys = torch.einsum("lbgn,lbgdn->lbgd", Cs, hs) 
+        ys = torch.einsum("lbgn,lbgdn->lbgd", Cs, hs)
         return ys, hs
-    
 
     dtype = torch.float32
     # dtype = torch.float16
@@ -367,7 +487,7 @@ def selective_scan_easy(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softplus
         dts = dts + delta_bias.view(1, -1, 1).to(dtype)
     if delta_softplus:
         dts = torch.nn.functional.softplus(dts)
-    
+
     if len(Bs.shape) == 3:
         Bs = Bs.unsqueeze(1)
     if len(Cs.shape) == 3:
@@ -380,13 +500,17 @@ def selective_scan_easy(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softplus
     Cs = Cs.permute(3, 0, 1, 2).to(dtype)
     Ds = Ds.view(G, -1).to(dtype) if has_D else None
     D = As.shape[1]
-    
+
     oys = []
     hprefix = us.new_zeros((B, G, D, N), dtype=dtype)
     for i in range(0, L, chunksize):
         ys, hs = selective_scan_chunk(
-            us[i:i + chunksize], dts[i:i + chunksize], 
-            As, Bs[i:i + chunksize], Cs[i:i + chunksize], hprefix, 
+            us[i : i + chunksize],
+            dts[i : i + chunksize],
+            As,
+            Bs[i : i + chunksize],
+            Cs[i : i + chunksize],
+            hprefix,
         )
         oys.append(ys)
         hprefix = hs[-1]
@@ -401,9 +525,12 @@ def selective_scan_easy(us, dts, As, Bs, Cs, Ds, delta_bias=None, delta_softplus
 
 
 from test_selective_scan_easy import selective_scan_easyv3
+
 selective_scan_easy = selective_scan_easyv3
 from ssmtriton import selective_scan_easyv3
+
 selective_scan_easy_v2 = selective_scan_easyv3
+
 
 def test_speed():
     MODE = "sscore"
@@ -414,7 +541,7 @@ def test_speed():
     is_variable_B = True
     is_variable_C = True
     has_D = True
-    has_z = False # sscore not support z
+    has_z = False  # sscore not support z
     has_delta_bias = True
     varBC_groups = 2
     seqlen = 4096
@@ -429,10 +556,10 @@ def test_speed():
     dstate = 1
     # dstate = 24
     delta_softplus = True
-    device = 'cuda'
+    device = "cuda"
     TIMES = 100
-    import selective_scan_cuda_core
     import selective_scan_cuda
+
     # copied from test_selective_scan ======================
     torch.random.manual_seed(0)
     is_complex = wtype == torch.complex64
@@ -442,17 +569,35 @@ def test_speed():
     elif varBC_groups == 1:
         B_shape = (batch_size, dstate, seqlen if not is_complex else seqlen * 2)
     else:
-        B_shape = (batch_size, varBC_groups, dstate, seqlen if not is_complex else seqlen * 2)
-    B = torch.randn(*B_shape, device=device, dtype=wtype if not is_variable_B else itype,
-                    requires_grad=True)
+        B_shape = (
+            batch_size,
+            varBC_groups,
+            dstate,
+            seqlen if not is_complex else seqlen * 2,
+        )
+    B = torch.randn(
+        *B_shape,
+        device=device,
+        dtype=wtype if not is_variable_B else itype,
+        requires_grad=True,
+    )
     if not is_variable_C:
         C_shape = (dim, dstate)
     elif varBC_groups == 1:
         C_shape = (batch_size, dstate, seqlen if not is_complex else seqlen * 2)
     else:
-        C_shape = (batch_size, varBC_groups, dstate, seqlen if not is_complex else seqlen * 2)
-    C = torch.randn(*C_shape, device=device, dtype=wtype if not is_variable_C else itype,
-                    requires_grad=True)
+        C_shape = (
+            batch_size,
+            varBC_groups,
+            dstate,
+            seqlen if not is_complex else seqlen * 2,
+        )
+    C = torch.randn(
+        *C_shape,
+        device=device,
+        dtype=wtype if not is_variable_C else itype,
+        requires_grad=True,
+    )
     if has_D:
         D = torch.randn(dim, device=device, dtype=torch.float32, requires_grad=True)
     else:
@@ -479,9 +624,43 @@ def test_speed():
     starts = []
     ends = []
     tests = [
-        partial(build_selective_scan_fn(selective_scan_cuda, mode="mamba_ssm", tag="ori"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True),
-        partial(selective_scan_easy, u, delta, A, B, C, D, delta_bias, delta_softplus, return_last_state=True),
-        partial(selective_scan_easy_v2, u, delta, A, B, C, D, delta_bias, delta_softplus, return_last_state=True),
+        partial(
+            build_selective_scan_fn(selective_scan_cuda, mode="mamba_ssm", tag="ori"),
+            u,
+            delta,
+            A,
+            B,
+            C,
+            D,
+            z,
+            delta_bias,
+            delta_softplus,
+            return_last_state=True,
+        ),
+        partial(
+            selective_scan_easy,
+            u,
+            delta,
+            A,
+            B,
+            C,
+            D,
+            delta_bias,
+            delta_softplus,
+            return_last_state=True,
+        ),
+        partial(
+            selective_scan_easy_v2,
+            u,
+            delta,
+            A,
+            B,
+            C,
+            D,
+            delta_bias,
+            delta_softplus,
+            return_last_state=True,
+        ),
         # partial(build_selective_scan_fn(selective_scan_cuda_core, mode=MODE, tag="f1b1"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=1, backnrows=1),
         # partial(build_selective_scan_fn(selective_scan_cuda_core, mode=MODE, tag="f2b1"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=2, backnrows=1),
         # partial(build_selective_scan_fn(selective_scan_cuda_core, mode=MODE, tag="f3b1"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=3, backnrows=1),
@@ -490,7 +669,19 @@ def test_speed():
         # partial(build_selective_scan_fn(selective_scan_cuda_core, mode=MODE, tag="f2b2"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=2, backnrows=2),
         # partial(build_selective_scan_fn(selective_scan_cuda_core, mode=MODE, tag="f2b3"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=3, backnrows=3),
         # partial(build_selective_scan_fn(selective_scan_cuda_core, mode=MODE, tag="f4b4"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True, nrows=4, backnrows=4),
-        partial(build_selective_scan_fn(selective_scan_cuda, mode="mamba_ssm", tag="ori"), u, delta, A, B, C, D, z, delta_bias, delta_softplus, return_last_state=True),
+        partial(
+            build_selective_scan_fn(selective_scan_cuda, mode="mamba_ssm", tag="ori"),
+            u,
+            delta,
+            A,
+            B,
+            C,
+            D,
+            z,
+            delta_bias,
+            delta_softplus,
+            return_last_state=True,
+        ),
     ]
 
     for test in tests:
@@ -515,5 +706,6 @@ def test_speed():
         starts.append(s)
         ends.append(e)
         print("fwdbwd", test.func.__repr__(), e - s, flush=True)
+
 
 test_speed()

@@ -1,44 +1,34 @@
 # Modified by Mzero #20240123
 # Copyright (c) 2023, Albert Gu, Tri Dao.
-import sys
-import warnings
 import os
-import re
-import ast
 from pathlib import Path
-from packaging.version import parse, Version
-import platform
-import shutil
-
-from setuptools import setup, find_packages
 import subprocess
-from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
+import warnings
 
+from packaging.version import Version, parse
+from setuptools import setup
 import torch
-from torch.utils.cpp_extension import (
-    BuildExtension,
-    CppExtension,
-    CUDAExtension,
-    CUDA_HOME,
-)
+from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CUDAExtension
+from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 # ninja build does not work unless include_dirs are abs path
 this_dir = os.path.dirname(os.path.abspath(__file__))
 # For CI, we want the option to build with C++11 ABI since the nvcr images use C++11 ABI
 FORCE_CXX11_ABI = os.getenv("FORCE_CXX11_ABI", "FALSE") == "TRUE"
 
+
 def get_cuda_bare_metal_version(cuda_dir):
-    raw_output = subprocess.check_output(
-        [cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True
-    )
+    raw_output = subprocess.check_output([cuda_dir + "/bin/nvcc", "-V"], universal_newlines=True)
     output = raw_output.split()
     release_idx = output.index("release") + 1
     bare_metal_version = parse(output[release_idx].split(",")[0])
 
     return raw_output, bare_metal_version
 
+
 MODES = ["core", "ndstate", "oflex"]
 # MODES = ["core", "ndstate", "oflex", "nrow"]
+
 
 def get_ext():
     cc_flag = []
@@ -58,7 +48,7 @@ def get_ext():
             warnings.warn("CUDA version ealier than 11.6 may leads to performance mismatch.")
         if bare_metal_version < Version("11.2"):
             multi_threads = False
-            
+
     cc_flag.extend(["-gencode", "arch=compute_70,code=sm_70"])
     cc_flag.extend(["-gencode", "arch=compute_80,code=sm_80"])
     if gencode_sm90:
@@ -115,21 +105,21 @@ def get_ext():
             extra_compile_args={
                 "cxx": ["-O3", "-std=c++17"],
                 "nvcc": [
-                            "-O3",
-                            "-std=c++17",
-                            "-U__CUDA_NO_HALF_OPERATORS__",
-                            "-U__CUDA_NO_HALF_CONVERSIONS__",
-                            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-                            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                            "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
-                            "--expt-relaxed-constexpr",
-                            "--expt-extended-lambda",
-                            "--use_fast_math",
-                            "--ptxas-options=-v",
-                            "-lineinfo",
-                        ]
-                        + cc_flag
+                    "-O3",
+                    "-std=c++17",
+                    "-U__CUDA_NO_HALF_OPERATORS__",
+                    "-U__CUDA_NO_HALF_CONVERSIONS__",
+                    "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+                    "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+                    "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+                    "-U__CUDA_NO_BFLOAT162_CONVERSIONS__",
+                    "--expt-relaxed-constexpr",
+                    "--expt-extended-lambda",
+                    "--use_fast_math",
+                    "--ptxas-options=-v",
+                    "-lineinfo",
+                ]
+                + cc_flag,
             },
             include_dirs=[Path(this_dir) / "csrc" / "selective_scan"],
         )
@@ -137,6 +127,7 @@ def get_ext():
     ]
 
     return ext_modules
+
 
 ext_modules = get_ext()
 setup(
@@ -155,7 +146,13 @@ setup(
         "Operating System :: Unix",
     ],
     ext_modules=ext_modules,
-    cmdclass={"bdist_wheel": _bdist_wheel, "build_ext": BuildExtension} if ext_modules else {"bdist_wheel": _bdist_wheel,},
+    cmdclass=(
+        {"bdist_wheel": _bdist_wheel, "build_ext": BuildExtension}
+        if ext_modules
+        else {
+            "bdist_wheel": _bdist_wheel,
+        }
+    ),
     python_requires=">=3.7",
     install_requires=[
         "torch",

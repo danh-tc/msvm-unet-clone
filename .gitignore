@@ -160,3 +160,14 @@ cython_debug/
 .idea/
 .vscode/
 .DS_Store
+
+# Project specific
+log/
+logs/
+results/
+dataset/
+pretrain/
+*.ckpt
+*.pth
+*.npz
+*.h5
