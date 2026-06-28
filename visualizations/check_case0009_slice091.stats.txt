@@ -1,0 +1,14 @@
+sample: data/Synapse/train_npz/case0009_slice091.npz
+image shape: (512, 512), dtype=float32
+label shape: (512, 512), dtype=float32
+
+Visible slice statistics
+  total pixels/voxels: 262144
+  foreground pixels/voxels: 40012 (15.2634% of total)
+  foreground classes present: 4 (1, 5, 7, 8)
+  class breakdown:
+    id  name             count        %total     %foreground
+    1   Aorta            495            0.1888%     1.2371%
+    5   Liver            17734          6.7650%    44.3217%
+    7   Spleen           17309          6.6029%    43.2595%
+    8   Stomach          4474           1.7067%    11.1816%
