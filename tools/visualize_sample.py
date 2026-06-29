@@ -3,10 +3,10 @@ import argparse
 import os
 import os.path as osp
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 try:
     from data import DATASETS
@@ -78,6 +78,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=0.45, help="Overlay opacity for labels.")
     parser.add_argument("--out", type=str, default=None, help="Output PNG path.")
     parser.add_argument(
+        "--report",
+        action="store_true",
+        help="For 3D volumes, create a report figure with multiple 2D slices covering foreground classes.",
+    )
+    parser.add_argument(
+        "--max-report-slices",
+        type=int,
+        default=8,
+        help="Maximum slices in --report mode. Default: 8.",
+    )
+    parser.add_argument(
+        "--target-classes",
+        type=str,
+        default="auto",
+        help="Class ids to cover in --report mode, e.g. 1,2,3,4,5,6,7,8. Default: auto foreground classes.",
+    )
+    parser.add_argument(
         "--class-names",
         type=str,
         default="auto",
@@ -85,6 +102,15 @@ def parse_args() -> argparse.Namespace:
         help="Class name mapping for printed statistics.",
     )
     return parser.parse_args()
+
+
+def get_font(size: int = 16) -> ImageFont.ImageFont:
+    for name in ("DejaVuSans.ttf", "Arial.ttf"):
+        try:
+            return ImageFont.truetype(name, size=size)
+        except OSError:
+            pass
+    return ImageFont.load_default()
 
 
 def load_sample(path: str, image_key: str, label_key: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -223,6 +249,165 @@ def make_panel(image: np.ndarray, label: np.ndarray, alpha: float) -> np.ndarray
     return np.hstack([image_rgb, divider, label_rgb, divider, overlay, divider, contour])
 
 
+def make_panel_with_titles(
+    image: np.ndarray,
+    label: np.ndarray,
+    alpha: float,
+    title: str,
+    subtitle: str,
+) -> Image.Image:
+    panel = Image.fromarray(make_panel(image, label, alpha))
+    font = get_font(16)
+    small_font = get_font(13)
+    header_h = 58
+    out = Image.new("RGB", (panel.width, panel.height + header_h), "white")
+    draw = ImageDraw.Draw(out)
+    draw.text((8, 6), title, fill=(0, 0, 0), font=font)
+    draw.text((8, 30), subtitle, fill=(60, 60, 60), font=small_font)
+
+    col_w = image.shape[1]
+    x_positions = [0, col_w + 6, 2 * col_w + 12, 3 * col_w + 18]
+    for x, name in zip(x_positions, ("CT slice", "GT mask", "GT overlay", "GT contour")):
+        draw.text((x + 8, header_h - 20), name, fill=(0, 0, 0), font=small_font)
+    out.paste(panel, (0, header_h))
+    return out
+
+
+def parse_target_classes(value: str, label: np.ndarray) -> List[int]:
+    if value != "auto":
+        return [int(v.strip()) for v in value.split(",") if v.strip()]
+    classes = sorted(int(v) for v in np.unique(label) if int(v) != 0)
+    return classes
+
+
+def classes_present_text(label_slice: np.ndarray, class_names: Dict[int, str]) -> str:
+    present = [int(v) for v in np.unique(label_slice) if int(v) != 0]
+    if not present:
+        return "GT: no foreground"
+    names = [f"{i} {class_names.get(i, f'class_{i}')}" for i in present]
+    return "GT: " + ", ".join(names)
+
+
+def select_report_slices(label: np.ndarray, target_classes: Sequence[int], max_slices: int) -> List[int]:
+    if label.ndim != 3:
+        return []
+
+    target = {int(c) for c in target_classes if np.any(label == int(c))}
+    if not target:
+        return [label.shape[0] // 2]
+
+    flat = label.reshape(label.shape[0], -1)
+    areas = {cls_id: (flat == cls_id).sum(axis=1) for cls_id in target}
+    remaining = set(target)
+    selected: List[int] = []
+
+    while remaining and len(selected) < max_slices:
+        best_z = None
+        best_score = None
+        for z in range(label.shape[0]):
+            if z in selected:
+                continue
+            covered = [cls_id for cls_id in remaining if areas[cls_id][z] > 0]
+            if not covered:
+                continue
+            # Prefer slices that cover more remaining organs, then larger GT area.
+            score = (len(covered), int(sum(areas[cls_id][z] for cls_id in covered)))
+            if best_score is None or score > best_score:
+                best_score = score
+                best_z = z
+        if best_z is None:
+            break
+        selected.append(int(best_z))
+        remaining -= {cls_id for cls_id in remaining if areas[cls_id][best_z] > 0}
+
+    if not selected:
+        foreground = (label > 0).reshape(label.shape[0], -1).sum(axis=1)
+        selected = [int(np.argmax(foreground)) if foreground.max(initial=0) > 0 else label.shape[0] // 2]
+    return selected
+
+
+def make_legend(class_names: Dict[int, str], class_ids: Sequence[int], width: int) -> Image.Image:
+    font = get_font(14)
+    title_font = get_font(17)
+    row_h = 24
+    ids = [int(i) for i in class_ids if int(i) != 0]
+    height = 42 + max(1, len(ids)) * row_h
+    legend = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(legend)
+    draw.text((8, 8), "GT label legend", fill=(0, 0, 0), font=title_font)
+    if not ids:
+        draw.text((8, 36), "No foreground labels", fill=(70, 70, 70), font=font)
+        return legend
+
+    x = 8
+    y = 38
+    col_w = max(150, width // 4)
+    for idx, cls_id in enumerate(ids):
+        if idx > 0 and idx % 4 == 0:
+            x = 8
+            y += row_h
+        color = tuple(int(v) for v in COLORS[cls_id % len(COLORS)])
+        draw.rectangle((x, y + 3, x + 16, y + 19), fill=color, outline=(0, 0, 0))
+        draw.text((x + 24, y + 2), f"{cls_id}: {class_names.get(cls_id, f'class_{cls_id}')}", fill=(0, 0, 0), font=font)
+        x += col_w
+    return legend
+
+
+def make_volume_report(
+    image: np.ndarray,
+    label: np.ndarray,
+    alpha: float,
+    class_names: Dict[int, str],
+    target_classes: Sequence[int],
+    max_slices: int,
+    sample_path: str,
+) -> Tuple[Image.Image, List[int]]:
+    if image.ndim != 3 or label.ndim != 3:
+        panel = Image.fromarray(make_panel(image, label, alpha))
+        return panel, []
+
+    selected = select_report_slices(label, target_classes, max_slices)
+    rows = []
+    covered = set()
+    for row_idx, z in enumerate(selected, start=1):
+        view_label = label[z]
+        present = [int(v) for v in np.unique(view_label) if int(v) != 0]
+        covered.update(present)
+        title = f"Slice {z} ({row_idx}/{len(selected)})"
+        subtitle = classes_present_text(view_label, class_names)
+        rows.append(make_panel_with_titles(image[z], view_label, alpha, title, subtitle))
+
+    width = max(row.width for row in rows)
+    target_present = [int(c) for c in target_classes if np.any(label == int(c))]
+    legend = make_legend(class_names, sorted(target_present), width)
+
+    title_font = get_font(18)
+    small_font = get_font(14)
+    header = Image.new("RGB", (width, 76), "white")
+    draw = ImageDraw.Draw(header)
+    draw.text((8, 8), "Synapse 3D volume with GT annotations", fill=(0, 0, 0), font=title_font)
+    draw.text((8, 34), f"sample: {sample_path}", fill=(50, 50, 50), font=small_font)
+    draw.text(
+        (8, 54),
+        f"selected slices: {', '.join(str(z) for z in selected)} | covered GT classes: {', '.join(str(c) for c in sorted(covered))}",
+        fill=(50, 50, 50),
+        font=small_font,
+    )
+
+    gap = 12
+    height = header.height + legend.height + gap * (len(rows) + 1) + sum(row.height for row in rows)
+    canvas = Image.new("RGB", (width, height), "white")
+    y = 0
+    canvas.paste(header, (0, y))
+    y += header.height
+    canvas.paste(legend, (0, y))
+    y += legend.height + gap
+    for row in rows:
+        canvas.paste(row, (0, y))
+        y += row.height + gap
+    return canvas, selected
+
+
 def infer_class_names(args: argparse.Namespace, label: np.ndarray) -> Dict[int, str]:
     if args.class_names == "none":
         return {}
@@ -273,30 +458,48 @@ def main() -> None:
     args = parse_args()
     sample_path = args.file or resolve_dataset_path(args)
     image, label = load_sample(sample_path, args.image_key, args.label_key)
+    class_names = infer_class_names(args, label)
 
-    z = pick_slice(image, label, args.slice)
-    if z is not None:
-        if z < 0 or z >= image.shape[0]:
-            raise IndexError(f"slice {z} out of range for volume depth {image.shape[0]}")
-        view_image = image[z]
-        view_label = label[z]
+    if args.report:
+        target_classes = parse_target_classes(args.target_classes, label)
+        report, selected_slices = make_volume_report(
+            image=image,
+            label=label,
+            alpha=args.alpha,
+            class_names=class_names,
+            target_classes=target_classes,
+            max_slices=args.max_report_slices,
+            sample_path=sample_path,
+        )
+        view_label = label[selected_slices[0]] if selected_slices else label
+        z = selected_slices[0] if selected_slices else None
+        panel_image = report
     else:
-        view_image = image
-        view_label = label
+        z = pick_slice(image, label, args.slice)
+        if z is not None:
+            if z < 0 or z >= image.shape[0]:
+                raise IndexError(f"slice {z} out of range for volume depth {image.shape[0]}")
+            view_image = image[z]
+            view_label = label[z]
+        else:
+            view_image = image
+            view_label = label
 
-    if view_image.shape[:2] != view_label.shape[:2]:
-        raise ValueError(f"Image/label shape mismatch after slicing: {view_image.shape} vs {view_label.shape}")
+        if view_image.shape[:2] != view_label.shape[:2]:
+            raise ValueError(f"Image/label shape mismatch after slicing: {view_image.shape} vs {view_label.shape}")
+        panel_image = Image.fromarray(make_panel(view_image, view_label, args.alpha))
 
-    panel = make_panel(view_image, view_label, args.alpha)
     out = args.out
     if out is None:
         stem = Path(sample_path).name.replace(".npy.h5", "").replace(".npz", "").replace(".h5", "").replace(".npy", "")
-        suffix = f"_z{z:03d}" if z is not None else ""
+        if args.report:
+            suffix = "_report"
+        else:
+            suffix = f"_z{z:03d}" if z is not None else ""
         out = osp.join("visualizations", f"{stem}{suffix}.png")
     os.makedirs(osp.dirname(out) or ".", exist_ok=True)
-    Image.fromarray(panel).save(out)
+    panel_image.save(out)
 
-    class_names = infer_class_names(args, label)
     unique, counts = np.unique(view_label, return_counts=True)
     label_stats = ", ".join(f"{int(k)}:{int(v)}" for k, v in zip(unique, counts))
     print(f"sample: {sample_path}")

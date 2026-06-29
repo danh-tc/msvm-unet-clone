@@ -171,3 +171,5 @@ pretrain/
 *.pth
 *.npz
 *.h5
+
+/.venv*/**
