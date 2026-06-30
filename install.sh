@@ -13,6 +13,9 @@ CKPT_DIR="$SCRIPT_DIR/log/msvm_unet-synapse-r0/checkpoints"
 CKPT_NAME="epoch.259-val_mean_dice.0.8500.ckpt"
 DATA_DIR="${DATA_DIR:-/data}"
 SYNAPSE_GDRIVE_ID="1BvpY0g9mKkkhdHpAX1HqDw8iTJNbFuwq"
+SAMMED2D_GDRIVE_ID="1ARiB5RkSsWmAB_8mqWnwDF8ZKTtFwsjl"
+SAMMED2D_CKPT_DIR="$SCRIPT_DIR/SAM-Med2D/pretrain_model"
+SAMMED2D_CKPT_NAME="sam-med2d_b.pth"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -170,6 +173,26 @@ else
     info "Checkpoint downloaded: $(du -sh "$CKPT_DIR/$CKPT_NAME" | cut -f1)"
 fi
 
+# ── step 13: SAM-Med2D checkpoint ────────────────────────────────────────────
+
+info "Step 13: SAM-Med2D checkpoint → $SAMMED2D_CKPT_DIR/$SAMMED2D_CKPT_NAME"
+
+# albumentations is required by SAM-Med2D's predictor (predictor_sammed.py)
+pip install albumentations -q --cache-dir "$PIP_CACHE_DIR"
+
+if [[ -f "$SAMMED2D_CKPT_DIR/$SAMMED2D_CKPT_NAME" ]]; then
+    info "SAM-Med2D checkpoint already exists, skipping download."
+else
+    mkdir -p "$SAMMED2D_CKPT_DIR"
+
+    # gdown cần có trong venv (đã active từ bước 3)
+    pip install gdown -q --cache-dir "$PIP_CACHE_DIR"
+
+    info "Downloading SAM-Med2D checkpoint (~2.4GB)..."
+    gdown "$SAMMED2D_GDRIVE_ID" -O "$SAMMED2D_CKPT_DIR/$SAMMED2D_CKPT_NAME"
+    info "SAM-Med2D checkpoint downloaded: $(du -sh "$SAMMED2D_CKPT_DIR/$SAMMED2D_CKPT_NAME" | cut -f1)"
+fi
+
 # ── done: smoke test ─────────────────────────────────────────────────────────
 
 info "Smoke test..."
@@ -178,6 +201,7 @@ import torch, torchvision, timm, monai
 import lightning as L
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 import einops, h5py, cv2, scipy, medpy
+import albumentations
 import selective_scan_cuda_oflex
 import selective_scan_cuda_core
 
@@ -186,7 +210,7 @@ print(f"  torchvision: {torchvision.__version__}")
 print(f"  timm:        {timm.__version__}")
 print(f"  monai:       {monai.__version__}")
 print(f"  lightning:   {L.__version__}")
-print(f"  einops / h5py / opencv / scipy / medpy: OK")
+print(f"  einops / h5py / opencv / scipy / medpy / albumentations: OK")
 print(f"  selective_scan_cuda_oflex / core: OK")
 PYEOF
 
@@ -194,3 +218,4 @@ echo ""
 info "Installation complete!"
 info "Activate the environment with: source $VENV_DIR/bin/activate"
 info "Synapse dataset: $DATA_DIR/Synapse"
+info "SAM-Med2D checkpoint: $SAMMED2D_CKPT_DIR/$SAMMED2D_CKPT_NAME"
