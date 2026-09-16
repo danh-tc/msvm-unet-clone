@@ -28,6 +28,8 @@ Defaults:
                          MedSAM is always box-only, matching its released inference recipe.)
     --output-json       results/infer_single_sam_results.json   (--all mode only)
 """
+from __future__ import annotations
+
 import argparse
 import importlib.util
 import json
@@ -142,10 +144,13 @@ class MedSAMPredictor:
         self._h, self._w = h, w
 
     @torch.no_grad()
-    def predict(self, box: np.ndarray, mask_input=None, multimask_output: bool = False):
-        """Box-only prompt; mask_input/multimask_output are accepted for interface
-        parity with SammedPredictor but unused — MedSAM's release recipe is box-only,
-        single-mask."""
+    def predict(
+        self, box: np.ndarray, point_coords=None, point_labels=None,
+        mask_input=None, multimask_output: bool = False,
+    ):
+        """Box-only prompt; point_coords/point_labels/mask_input/multimask_output are
+        accepted for interface parity with SammedPredictor but unused — MedSAM's
+        release recipe is box-only, single-mask."""
         box_1024 = box.astype(np.float32) / np.array(
             [self._w, self._h, self._w, self._h], dtype=np.float32
         ) * MEDSAM_IMAGE_SIZE
@@ -186,6 +191,34 @@ def mask_prompt_input(mask: np.ndarray) -> np.ndarray:
     return logits[None, :, :].astype(np.float32)
 
 
+def extract_points(mask: np.ndarray, dilated: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """One positive + one negative point prompt from a binary mask, via distance
+    transform (no FastGeodis dependency needed — cv2 is enough):
+
+    - Positive point: the mask's most "interior" pixel (max distance to the
+      mask's own boundary) — robust to noisy/ragged boundaries, unlike a
+      boundary or centroid pick that can land outside a concave mask.
+    - Negative point: the pixel in the dilated refine band (but outside the
+      mask) farthest from the mask — anchors right at the edge of the allowed
+      refine region, reinforcing the same anti-leak intent as the dilate clip.
+    """
+    mask_u8 = mask.astype(np.uint8)
+    dist_in = cv2.distanceTransform(mask_u8, cv2.DIST_L2, 5)
+    py, px = np.unravel_index(np.argmax(dist_in), dist_in.shape)
+    coords = [[px, py]]
+    labels = [1]
+
+    band = dilated & ~mask
+    if band.any():
+        dist_out = cv2.distanceTransform((~mask).astype(np.uint8), cv2.DIST_L2, 5)
+        dist_out[~band] = -1
+        ny, nx = np.unravel_index(np.argmax(dist_out), dist_out.shape)
+        coords.append([nx, ny])
+        labels.append(0)
+
+    return np.array(coords, dtype=np.float32), np.array(labels, dtype=np.int32)
+
+
 def binary_iou(a: np.ndarray, b: np.ndarray) -> float:
     a = a.astype(bool); b = b.astype(bool)
     union = (a | b).sum()
@@ -205,6 +238,7 @@ def refine_volume(
     dilate_iters: int,
     iou_threshold: float,
     desc: str = "SAM refine",
+    use_points: bool = False,
 ) -> np.ndarray:
     """Per-slice, per-class refinement of an MSVM-UNet prediction via any
     predictor exposing SammedPredictor's set_image()/predict() interface
@@ -239,14 +273,21 @@ def refine_volume(
             box = np.array([xs.min(), ys.min(), xs.max(), ys.max()])
             mask_input = mask_prompt_input(mask_c) if use_mask_prompt else None
 
+            # restrict the refiner's mask to a dilated band around its own baseline mask
+            dilated = cv2.dilate(mask_c.astype(np.uint8), kernel, iterations=dilate_iters).astype(bool)
+
+            if use_points:
+                point_coords, point_labels = extract_points(mask_c, dilated)
+            else:
+                point_coords, point_labels = None, None
+
             masks, scores, _ = predictor.predict(
+                point_coords=point_coords, point_labels=point_labels,
                 box=box, mask_input=mask_input, multimask_output=True,
             )
             best = int(np.argmax(scores))
             pred_mask, pred_score = masks[best].astype(bool), float(scores[best])
 
-            # restrict the refiner's mask to a dilated band around its own baseline mask
-            dilated = cv2.dilate(mask_c.astype(np.uint8), kernel, iterations=dilate_iters).astype(bool)
             pred_mask_clipped = pred_mask & dilated
 
             if binary_iou(pred_mask_clipped, mask_c) >= iou_threshold:
@@ -262,100 +303,103 @@ def refine_volume(
 
 
 def compute_metrics(
-    baseline: np.ndarray, sammed: np.ndarray, medsam: np.ndarray, label: np.ndarray,
+    baseline: np.ndarray, sammed: np.ndarray, medsam: np.ndarray | None, label: np.ndarray,
 ) -> dict:
-    """Per-class DSC/HD95 for baseline vs SAM-Med2D-refined vs MedSAM-refined, keyed by class name."""
+    """Per-class DSC/HD95 for baseline vs SAM-Med2D-refined vs (optionally) MedSAM-refined,
+    keyed by class name. medsam=None (--skip-medsam) omits the medsam_* keys entirely."""
     per_class = {}
     for c, name in enumerate(CLASS_NAMES, start=1):
         b_dsc, b_hd = calc_dsc_hd95(baseline == c, label == c)
         s_dsc, s_hd = calc_dsc_hd95(sammed == c, label == c)
-        m_dsc, m_hd = calc_dsc_hd95(medsam == c, label == c)
-        per_class[name] = {
-            "base_dsc": b_dsc, "sammed_dsc": s_dsc, "medsam_dsc": m_dsc,
-            "base_hd95": b_hd, "sammed_hd95": s_hd, "medsam_hd95": m_hd,
-        }
+        entry = {"base_dsc": b_dsc, "sammed_dsc": s_dsc, "base_hd95": b_hd, "sammed_hd95": s_hd}
+        if medsam is not None:
+            m_dsc, m_hd = calc_dsc_hd95(medsam == c, label == c)
+            entry["medsam_dsc"] = m_dsc
+            entry["medsam_hd95"] = m_hd
+        per_class[name] = entry
     return per_class
 
 
-_METRIC_KEYS = ("base_dsc", "sammed_dsc", "medsam_dsc", "base_hd95", "sammed_hd95", "medsam_hd95")
+# (key, column label, is_percent) — medsam_* columns are dropped automatically when absent
+# from the per_class dict (i.e. when running with --skip-medsam).
+_METRIC_COLUMNS = [
+    ("base_dsc", "Base DSC", True),
+    ("sammed_dsc", "SAMMed2D DSC", True),
+    ("medsam_dsc", "MedSAM DSC", True),
+    ("base_hd95", "Base HD95", False),
+    ("sammed_hd95", "SAMMed2D HD95", False),
+    ("medsam_hd95", "MedSAM HD95", False),
+]
+
+
+def _active_columns(per_class: dict) -> list:
+    has_medsam = any("medsam_dsc" in m for m in per_class.values())
+    return [col for col in _METRIC_COLUMNS if has_medsam or "medsam" not in col[0]]
+
+
+def _fmt(value: float, is_percent: bool) -> str:
+    return f"{value*100:>11.2f}%" if is_percent else f"{value:>11.2f}mm"
 
 
 def print_case_table(case_name: str, per_class: dict) -> None:
     print(f"\n=== {case_name} ===")
-    header = (
-        f"{'Class':<8}  {'Base DSC':>9}  {'SAMMed2D DSC':>13}  {'MedSAM DSC':>11}  "
-        f"{'Base HD95':>10}  {'SAMMed2D HD95':>14}  {'MedSAM HD95':>12}"
-    )
+    cols = _active_columns(per_class)
+    header = f"{'Class':<8}  " + "  ".join(f"{label:>13}" for _, label, _ in cols)
     print(header)
     print("-" * len(header))
-    cols = {k: [] for k in _METRIC_KEYS}
+    sums = {key: [] for key, _, _ in cols}
     for name in CLASS_NAMES:
         m = per_class[name]
-        print(
-            f"{name:<8}  {m['base_dsc']*100:>8.2f}%  {m['sammed_dsc']*100:>12.2f}%  "
-            f"{m['medsam_dsc']*100:>10.2f}%  {m['base_hd95']:>9.2f}mm  "
-            f"{m['sammed_hd95']:>13.2f}mm  {m['medsam_hd95']:>11.2f}mm"
-        )
-        for k in _METRIC_KEYS:
-            cols[k].append(m[k])
+        print(f"{name:<8}  " + "  ".join(_fmt(m[key], pct) for key, _, pct in cols))
+        for key, _, _ in cols:
+            sums[key].append(m[key])
     print("-" * len(header))
-    means = {k: np.mean(v) for k, v in cols.items()}
-    print(
-        f"{'Mean':<8}  {means['base_dsc']*100:>8.2f}%  {means['sammed_dsc']*100:>12.2f}%  "
-        f"{means['medsam_dsc']*100:>10.2f}%  {means['base_hd95']:>9.2f}mm  "
-        f"{means['sammed_hd95']:>13.2f}mm  {means['medsam_hd95']:>11.2f}mm"
-    )
+    print(f"{'Mean':<8}  " + "  ".join(_fmt(np.mean(sums[key]), pct) for key, _, pct in cols))
 
 
 def print_aggregate_table(case_results: list) -> None:
     """case_results: list of {"case_name": str, "per_class": dict}."""
     print(f"\n{'='*110}\nAGGREGATE over {len(case_results)} cases (mean +- std)\n{'='*110}")
-    header = (
-        f"{'Class':<8}  {'Base DSC':>15}  {'SAMMed2D DSC':>15}  {'MedSAM DSC':>15}  "
-        f"{'Base HD95':>16}  {'SAMMed2D HD95':>16}  {'MedSAM HD95':>16}"
-    )
+    cols = _active_columns(case_results[0]["per_class"])
+    header = f"{'Class':<8}  " + "  ".join(f"{label:>24}" for _, label, _ in cols)
     print(header)
     print("-" * len(header))
 
-    all_means = {k: [] for k in _METRIC_KEYS}
+    all_means = {key: [] for key, _, _ in cols}
     for name in CLASS_NAMES:
-        arrs = {
-            k: np.array([r["per_class"][name][k] for r in case_results])
-            for k in _METRIC_KEYS
-        }
-        print(
-            f"{name:<8}  "
-            f"{arrs['base_dsc'].mean()*100:>6.2f}% +- {arrs['base_dsc'].std()*100:>4.2f}%  "
-            f"{arrs['sammed_dsc'].mean()*100:>6.2f}% +- {arrs['sammed_dsc'].std()*100:>4.2f}%  "
-            f"{arrs['medsam_dsc'].mean()*100:>6.2f}% +- {arrs['medsam_dsc'].std()*100:>4.2f}%  "
-            f"{arrs['base_hd95'].mean():>6.2f} +- {arrs['base_hd95'].std():>4.2f}mm  "
-            f"{arrs['sammed_hd95'].mean():>6.2f} +- {arrs['sammed_hd95'].std():>4.2f}mm  "
-            f"{arrs['medsam_hd95'].mean():>6.2f} +- {arrs['medsam_hd95'].std():>4.2f}mm"
-        )
-        for k in _METRIC_KEYS:
-            all_means[k].append(arrs[k].mean())
+        row = []
+        for key, _, pct in cols:
+            arr = np.array([r["per_class"][name][key] for r in case_results])
+            row.append(
+                f"{arr.mean()*100:>6.2f}% +- {arr.std()*100:>4.2f}%" if pct
+                else f"{arr.mean():>6.2f} +- {arr.std():>4.2f}mm"
+            )
+            all_means[key].append(arr.mean())
+        print(f"{name:<8}  " + "  ".join(f"{v:>24}" for v in row))
 
     print("-" * len(header))
-    print(
-        f"{'Mean':<8}  Base DSC: {np.mean(all_means['base_dsc'])*100:.2f}%   "
-        f"SAMMed2D DSC: {np.mean(all_means['sammed_dsc'])*100:.2f}%   "
-        f"MedSAM DSC: {np.mean(all_means['medsam_dsc'])*100:.2f}%   "
-        f"Base HD95: {np.mean(all_means['base_hd95']):.2f}mm   "
-        f"SAMMed2D HD95: {np.mean(all_means['sammed_hd95']):.2f}mm   "
-        f"MedSAM HD95: {np.mean(all_means['medsam_hd95']):.2f}mm"
+    summary = "   ".join(
+        f"{label}: {np.mean(all_means[key])*100:.2f}%" if pct
+        else f"{label}: {np.mean(all_means[key]):.2f}mm"
+        for key, label, pct in cols
     )
+    print(f"{'Mean':<8}  {summary}")
 
 
 def evaluate_case(
     volume_path: str,
     msvm_model: torch.nn.Module,
     sammed_predictor: SammedPredictor,
-    medsam_predictor: MedSAMPredictor,
+    medsam_predictor: MedSAMPredictor | None,
     device,
     use_mask_prompt: bool,
     dilate_iters: int,
     iou_threshold: float,
+    use_points: bool = False,
 ) -> dict:
+    """medsam_predictor=None (--skip-medsam) skips the MedSAM refine pass and its metrics.
+    use_points only applies to the SAM-Med2D pass — MedSAM stays box-only, matching its
+    released inference recipe."""
     case_name = osp.basename(volume_path)
     image, label = load_volume(volume_path)
     baseline_pred = predict_volume(msvm_model, image, str(device))
@@ -365,14 +409,18 @@ def evaluate_case(
         dilate_iters=dilate_iters,
         iou_threshold=iou_threshold,
         desc="SAM-Med2D refine",
+        use_points=use_points,
     )
-    medsam_pred = refine_volume(
-        medsam_predictor, image, baseline_pred,
-        use_mask_prompt=False,  # MedSAM's release recipe is box-only
-        dilate_iters=dilate_iters,
-        iou_threshold=iou_threshold,
-        desc="MedSAM refine",
-    )
+    if medsam_predictor is not None:
+        medsam_pred = refine_volume(
+            medsam_predictor, image, baseline_pred,
+            use_mask_prompt=False,  # MedSAM's release recipe is box-only
+            dilate_iters=dilate_iters,
+            iou_threshold=iou_threshold,
+            desc="MedSAM refine",
+        )
+    else:
+        medsam_pred = None
     per_class = compute_metrics(baseline_pred, sammed_pred, medsam_pred, label)
     return {"case_name": case_name, "per_class": per_class}
 
@@ -390,9 +438,19 @@ def main():
     parser.add_argument("--sam-checkpoint", default=SAM_CKPT_DEFAULT, help="SAM-Med2D checkpoint path")
     parser.add_argument("--medsam-checkpoint", default=MEDSAM_CKPT_DEFAULT, help="MedSAM (vit_b) checkpoint path")
     parser.add_argument(
+        "--skip-medsam", action="store_true",
+        help="Skip loading/running MedSAM entirely (e.g. checkpoint not downloaded yet). "
+             "Reports baseline vs SAM-Med2D-refine only.",
+    )
+    parser.add_argument(
         "--prompt", choices=["box", "box_mask"], default="box_mask",
         help="SAM-Med2D prompt type: box-only, or box + dense mask prompt (recommended, more accurate). "
              "MedSAM is always box-only, matching its released inference recipe.",
+    )
+    parser.add_argument(
+        "--use-points", action="store_true",
+        help="Add one positive + one negative point prompt (distance-transform-based) to "
+             "the SAM-Med2D pass, on top of --prompt. MedSAM stays box-only regardless.",
     )
     parser.add_argument(
         "--dilate-iters", type=int, default=3,
@@ -415,8 +473,9 @@ def main():
     print(f"Device : {device}")
     print(f"MSVM ckpt   : {args.ckpt}")
     print(f"SAM ckpt    : {args.sam_checkpoint}")
-    print(f"MedSAM ckpt : {args.medsam_checkpoint}")
+    print(f"MedSAM ckpt : {'skipped (--skip-medsam)' if args.skip_medsam else args.medsam_checkpoint}")
     print(f"Prompt   : {args.prompt}")
+    print(f"Use points    : {args.use_points}")
     print(f"Dilate iters  : {args.dilate_iters}")
     print(f"IoU threshold : {args.iou_threshold}")
 
@@ -433,8 +492,12 @@ def main():
     msvm_model = load_model(args.ckpt).to(device)
     print("Loading SAM-Med2D...")
     sammed_predictor = build_sam_predictor(args.sam_checkpoint, device)
-    print("Loading MedSAM...")
-    medsam_predictor = build_medsam_predictor(args.medsam_checkpoint, device)
+    if args.skip_medsam:
+        print("Skipping MedSAM (--skip-medsam)")
+        medsam_predictor = None
+    else:
+        print("Loading MedSAM...")
+        medsam_predictor = build_medsam_predictor(args.medsam_checkpoint, device)
 
     case_results = []
     for i, volume_path in enumerate(volume_paths, start=1):
@@ -444,6 +507,7 @@ def main():
             use_mask_prompt=(args.prompt == "box_mask"),
             dilate_iters=args.dilate_iters,
             iou_threshold=args.iou_threshold,
+            use_points=args.use_points,
         )
         case_results.append(result)
         print_case_table(result["case_name"], result["per_class"])
@@ -456,8 +520,10 @@ def main():
                 {
                     "config": {
                         "ckpt": args.ckpt, "sam_checkpoint": args.sam_checkpoint,
-                        "medsam_checkpoint": args.medsam_checkpoint,
-                        "prompt": args.prompt, "dilate_iters": args.dilate_iters,
+                        "medsam_checkpoint": None if args.skip_medsam else args.medsam_checkpoint,
+                        "skip_medsam": args.skip_medsam,
+                        "prompt": args.prompt, "use_points": args.use_points,
+                        "dilate_iters": args.dilate_iters,
                         "iou_threshold": args.iou_threshold,
                     },
                     "cases": case_results,
