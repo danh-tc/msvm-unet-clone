@@ -54,6 +54,26 @@ def mean_over_classes(per_class: dict, key: str) -> float:
     return float(np.mean([m[key] for m in per_class.values()]))
 
 
+def save_results(output_json: str, runs: dict, args, severities: list) -> None:
+    """Write results so far as JSON, atomically (tmp file + rename) so a kill
+    mid-write never leaves a truncated/corrupt file. Called after every
+    corruption/severity block finishes, not just once at the end, so a crash
+    or OOM partway through a long sweep doesn't lose already-computed runs.
+    """
+    os.makedirs(osp.dirname(output_json), exist_ok=True)
+    payload = {
+        "config": {
+            "ckpt": args.ckpt, "corruptions": args.corruptions,
+            "severities": severities, "seed": args.seed,
+        },
+        "runs": runs,
+    }
+    tmp_path = output_json + ".tmp"
+    with open(tmp_path, "w") as fp:
+        json.dump(payload, fp, indent=2)
+    os.replace(tmp_path, output_json)
+
+
 def evaluate_volume(
     volume_path: str, model, device, corruption: str, severity: int, seed: int,
 ) -> dict:
@@ -130,6 +150,7 @@ def main():
         mean_dsc = np.mean([mean_over_classes(c["per_class"], "dsc") for c in cases])
         mean_hd = np.mean([mean_over_classes(c["per_class"], "hd95") for c in cases])
         print(f"clean severity=0  mean DSC={mean_dsc*100:.2f}%  mean HD95={mean_hd:.2f}mm  (n={len(cases)})")
+        save_results(args.output_json, runs, args, severities)
 
     for corruption in args.corruptions:
         runs.setdefault(corruption, {})
@@ -145,6 +166,7 @@ def main():
             mean_dsc = np.mean([mean_over_classes(c["per_class"], "dsc") for c in cases])
             mean_hd = np.mean([mean_over_classes(c["per_class"], "hd95") for c in cases])
             print(f"{corruption} severity={severity}  mean DSC={mean_dsc*100:.2f}%  mean HD95={mean_hd:.2f}mm  (n={len(cases)})")
+            save_results(args.output_json, runs, args, severities)
 
     # compact summary grid: rows = severity, cols = corruption (+ clean)
     print(f"\n{'='*70}\nSUMMARY (mean DSC %, all classes & cases)\n{'='*70}")
@@ -166,18 +188,7 @@ def main():
                 row += f"{mean_dsc*100:>15.2f}%"
         print(row)
 
-    os.makedirs(osp.dirname(args.output_json), exist_ok=True)
-    with open(args.output_json, "w") as fp:
-        json.dump(
-            {
-                "config": {
-                    "ckpt": args.ckpt, "corruptions": args.corruptions,
-                    "severities": severities, "seed": args.seed,
-                },
-                "runs": runs,
-            },
-            fp, indent=2,
-        )
+    save_results(args.output_json, runs, args, severities)
     print(f"\nSaved detailed results to {args.output_json}")
 
 

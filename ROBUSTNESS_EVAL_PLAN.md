@@ -114,7 +114,25 @@ trước đó (81.32%) với số tổng hợp toàn tập.
 - [x] **Smoke test tầng 1** (wiring check): chạy full pipeline severity=0 trên 1 volume, xác nhận DSC khớp chính xác baseline sạch của volume đó — case0001: 81.32% khớp 100%
 - [x] **Smoke test tầng 2** (integration nhỏ): 1 volume × 4 corruption × 2 severity (nhẹ nhất + nặng nhất) — severity=1 gần như phẳng ở cả 4 loại (đúng hướng); severity=4: gaussian_noise -2.74pp, poisson_noise -4.38pp, gaussian_blur -2.32pp, **contrast_shift -14.99pp (bất thường mạnh, HD95 20.14mm→78.05mm)**
 - [x] Check thêm contrast_shift severity 2,3 trên case0001 (chạy song song) — full curve DSC: 81.32/82.23/83.27/78.63/66.33% (sev0-4), HD95: 20.14/19.90/29.99/63.56/78.05mm. **Không suy giảm dần đều** — DSC còn nhích nhẹ ở sev1-2 rồi "gãy" ở sev3-4; nhưng **HD95 đã tăng rõ từ sev2** trong khi DSC còn trông ổn → HD95 là chỉ báo sớm nhạy hơn DSC cho corruption này
-- [ ] **Rủi ro mới phát hiện**: `medpy.metric.binary.hd95` chậm bất thường (vài phút thay vì vài giây) ở severity cao — do distance-transform trên mask bị suy biến (degenerate) tốn hơn nhiều so với mask "đẹp". Ước tính thời gian full sweep cần điều chỉnh tăng (có thể 1-2 tiếng ngay cả khi chạy song song 4 job theo corruption), không chỉ dựa trên thời gian inference thuần như tính ban đầu
-- [ ] Chạy full sweep: 4 corruption × các mức severity × 12 volume
-- [ ] Tổng hợp kết quả, tính degradation rate, so sánh organ nhỏ vs organ lớn
-- [ ] Xuất line chart + vài hình minh họa breakdown
+- [x] **Rủi ro HD95 chậm bất thường** — xác nhận đúng ở full sweep: `contrast_shift` là job chậm nhất (do nhiều volume/severity có mask suy biến), kéo tổng thời gian sweep lên ~4h14m thay vì ước tính ban đầu 35 phút-2.5 tiếng
+- [x] Chạy full sweep: 4 corruption × 5 severity (0-4) × 12 volume — chạy song song 4 job trong tmux, xong lúc 2026-09-17 15:56 UTC (~22:56 GMT+7). Không job nào lỗi/crash. severity=0 khớp chính xác baseline (83.96%) ở cả 4 job — sanity-check pass. File kết quả: `results/robustness_{gaussian_noise,poisson_noise,gaussian_blur,contrast_shift}.json`
+- [x] Tổng hợp kết quả, tính degradation rate, so sánh organ nhỏ vs organ lớn — xem bảng & phân tích chi tiết ở mục **"Kết quả full sweep"** bên dưới
+- [x] Xuất line chart mean DSC vs severity — `tools/plot_robustness.py` → `visualizations/robustness_dsc_vs_severity.png`
+- [x] Xuất ảnh minh họa mask dự đoán vỡ dần theo severity — `tools/visualize_robustness_breakdown.py` (case0001, so sánh corrupted CT / prediction overlay / GT overlay theo severity 0-4, cần GPU vì đi qua kernel Mamba, không có CPU fallback). `visualizations/breakdown_case0001_contrast_shift.png` và `visualizations/breakdown_case0001_gaussian_noise.png`
+
+## Kết quả full sweep (2026-09-17)
+
+Mean DSC (%) theo severity, baseline sạch = 83.96% (HD95 = 14.74mm):
+
+| Corruption | Sev0 | Sev1 | Sev2 | Sev3 | Sev4 | Suy giảm @sev4 |
+|---|---|---|---|---|---|---|
+| gaussian_noise | 83.96 | 83.97 | 83.43 | 81.76 | 78.53 | -6.5% |
+| poisson_noise | 83.96 | 83.60 | 82.47 | 80.26 | 77.70 | -7.5% |
+| gaussian_blur | 83.96 | 84.22 | 84.31 | 83.80 | 82.53 | -1.7% |
+| contrast_shift | 83.96 | 84.15 | 81.47 | **68.92** | **53.22** | **-36.6%** |
+
+Nhận xét:
+- `gaussian_blur` robust nhất — gần như không suy giảm ngay cả ở severity cao nhất.
+- `gaussian_noise`/`poisson_noise` suy giảm vừa phải, đều đặn theo severity.
+- `contrast_shift` phá vỡ mạnh từ severity 3 — xác nhận lại tín hiệu bất thường đã thấy ở smoke test case0001, giờ đúng trên cả 12 case.
+- Organ nhỏ vs lớn: ở 3 corruption đầu, đúng pattern cũ — GB (22-61%) và PC (40-68%) luôn yếu nhất ở severity=4, Liver/SP luôn mạnh nhất (90%+). Riêng `contrast_shift` severity=4 thì **organ lớn cũng sụp theo**: Liver rớt còn 18.51%, SP còn 25.04% — không còn giữ pattern "nhỏ yếu hơn lớn" nữa; ngược lại Aorta (87.45%) và PC (68.65%) lại chịu đựng tốt bất ngờ.
